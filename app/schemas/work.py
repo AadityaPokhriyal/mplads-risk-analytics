@@ -19,6 +19,7 @@ class WorkInput(BaseModel):
     has_images: bool = Field(default=False, description="Whether photographic proof was uploaded")
 
     model_config = {
+        "extra": "ignore",
         "json_schema_extra": {
             "example": {
                 "work_id": 134703,
