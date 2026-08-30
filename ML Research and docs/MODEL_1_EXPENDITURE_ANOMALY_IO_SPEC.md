@@ -32,8 +32,9 @@ This specification details the exact input features and output structure for **M
 | Feature Name | Type | Calculation / Logic | Purpose | Range |
 | :--- | :---: | :--- | :--- | :---: |
 | `expenditure_amount` | Float | Raw transaction value in ₹ | Captures payout magnitude | `₹1` to `₹3.25 Cr` |
-| `is_threshold_smurf` | Int (0/1)| `1` if amount is between ₹1.95L–₹1.999L or ₹4.90L–₹4.999L | Catches sanction-limit evasion | `0` or `1` |
+| `threshold_proximity_pct` | Int | Higher the value if closer to Thresholds (50000,500000,5000000) | Catches sanction-limit evasion | `0` to `1` |
 | `vendor_payout_velocity`| Int | Number of payouts to same vendor by same MP in last 30 days | Detects rapid fund dumping | `1` to `50+` |
+| `cumulative_vendor_spend_vs_threshold_pct` | Int | Proximity check on the total combined amount provided to a vendor by an MP | Catches scattered sanction-limit evasion | `0` to `1` |
 | `amount_to_mp_budget_pct`| Float | `(Transaction Amount / Total MP Allocation) * 100` | Checks budget share impact | `0.001%` to `20%` |
 | `ida_monthly_txns` | Int | Total transactions processed by this IDA in current month | Detects unusual district spikes| `1` to `500+` |
 
@@ -68,23 +69,17 @@ This specification details the exact input features and output structure for **M
 #### 🔴 Case 1: High-Risk Anomaly (Red Flag Detected)
 ```json
 {
-  "transaction_id": "TXN_106263",
+  "Work ID": "WS/MP377/2023-2024/15312",
   "risk_score": 88.5,
   "risk_level": "CRITICAL_ANOMALY",
   "is_anomaly": true,
   "metrics": {
     "amount": 199999.0,
-    "threshold_proximity": "₹1 below ₹2.00 Lakh fast-track limit",
-    "vendor_30d_frequency": 6,
+    "threshold_proximity_pct": "₹1 below ₹2.00 Lakh fast-track limit",
+    "vendor_payout_velocity": 6,
+    "cumulative_vendor_spend_vs_threshold_pct": 0.45,
     "budget_impact_pct": 0.13
   },
-  "flagged_reasons": [
-    "Threshold Skimming: Transaction amount is ₹1,99,999 (structured to bypass ₹2 Lakh administrative approval threshold)",
-    "High Velocity: 6th payout issued to 'DARSH BUILDCON' within 30 days",
-    "Repetitive Structure: Identical amount paid multiple times in same district"
-  ],
-  "explainability_tags": ["SMURFING_SUSPECTED", "HIGH_VENDOR_FREQUENCY"],
-  "recommended_action": "Withhold payment release and audit whether work was split into smaller tenders."
 }
 ```
 

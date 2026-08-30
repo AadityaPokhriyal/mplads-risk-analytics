@@ -1,0 +1,32 @@
+{
+    "Work ID": "WS/MP18239/2025-2026/214753",
+    "risk_score": 11.7,
+    "risk_level": "LOW_RISK",
+    "is_anomaly": false,
+    "metrics": {
+        "amount": 36159.0,
+        "threshold_proximity_pct": 0.39,
+        "vendor_30d_frequency": 17,
+        "cumulative_vendor_spend_vs_threshold_pct": 0.0,
+        "budget_impact_pct": 0.02,
+        "ida_monthly_txns": 83
+    },
+    "raw_anomaly_score": 0.214,
+    "top_contributing_features": [
+        {
+            "feature": "ida_monthly_txns",
+            "value": 83.0,
+            "contribution_to_risk": 0.0188
+        },
+        {
+            "feature": "expenditure_amount",
+            "value": 36159.0,
+            "contribution_to_risk": -0.0123
+        },
+        {
+            "feature": "cumulative_vendor_spend_vs_threshold_pct",
+            "value": 0.0,
+            "contribution_to_risk": -0.0122
+        }
+    ]
+}

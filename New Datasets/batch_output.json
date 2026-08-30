@@ -1,0 +1,34 @@
+{
+    "summary": {
+        "LOW_RISK": 3
+    },
+    "results": [
+        {
+            "work_id": "WS/MP18225/2024-2025/144260",
+            "mp_name": "PUSHPENDRA SAROJ",
+            "vendor": "VIVEK ENTERPRISES",
+            "expenditure_amount": 44356.0,
+            "risk_score": 20.3,
+            "risk_level": "LOW_RISK",
+            "is_anomaly": false
+        },
+        {
+            "work_id": "WS/MP18239/2025-2026/214753",
+            "mp_name": "ZIA UR REHMAN",
+            "vendor": "R G SUPLLIER",
+            "expenditure_amount": 36159.0,
+            "risk_score": 11.7,
+            "risk_level": "LOW_RISK",
+            "is_anomaly": false
+        },
+        {
+            "work_id": "WS/MP18190/2025-2026/162245",
+            "mp_name": "BALRAM NAIK PORIKA",
+            "vendor": "KADDHURI KATTAIAH",
+            "expenditure_amount": 139075.0,
+            "risk_score": 12.8,
+            "risk_level": "LOW_RISK",
+            "is_anomaly": false
+        }
+    ]
+}
