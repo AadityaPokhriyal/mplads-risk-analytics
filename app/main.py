@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas.expenditure_schema import *
 
@@ -108,6 +109,21 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MPLADS Expenditure Anomaly Engine", lifespan=lifespan)
+
+# ---------------------------------------------------------------------------
+# CORS Middleware
+# ---------------------------------------------------------------------------
+
+cors_origins_raw = os.getenv("CORS_ORIGINS", "*")
+origins = [o.strip() for o in cors_origins_raw.split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins if origins else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ---------------------------------------------------------------------------
