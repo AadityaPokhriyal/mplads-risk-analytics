@@ -1,119 +1,149 @@
-# Model 2: Project Delay & Cost Overrun Engine — Input & Output Specification
+# Model 2: Project Execution Delay & Stalling Engine — Input & Output Specification
 
-> **Model Type:** **Multivariate Outlier Scorer & Rule-Weighted Engine**  
-> **Target Scope:** Detecting Stalled Projects, Inflated Settled Costs, and Unverified Zero-Proof Completions  
-> **File Location:** `Ml research and docs/MODEL_2_EXECUTION_DELAY_IO_SPEC.md`
+> **Model Type:** **Multi-Stage Execution Latency Engine & Multivariate Isolation Forest**  
+> **Target Scope:** Detecting Stalled Projects (>365d), Stage-Wise Bottlenecks, Cost Escalation, & Zero-Proof Ghost Completions  
+> **Dataset Source:** `New Datasets/` (`Works Recommended.csv`, `Works Sanctioned.csv`, `Works Completed.csv`, `Expenditure on Completed and On-going Works as on Date.csv`)  
+> **File Location:** `ML Research and docs/MODEL_2_EXECUTION_DELAY_IO_SPEC.md`  
 
 ---
 
 ## 1. Overview
-This specification details the exact input features and output structure for **Model 2 (Pillar 2)**. It evaluates project execution performance, compliance with photographic verification mandates, and cost inflation deltas.
+
+This specification defines the input features, feature engineering pipeline, API schemas, and response payload structure for **Model 2 (Pillar 2: Project Execution Delay & Cost Overrun Engine)**. It processes live project milestones from the MPLADS portal, evaluates multi-stage execution latencies against state/sector baselines, enforces mandatory photographic proof compliance, and predicts execution risk scores for active and completed works.
 
 ---
 
 ## 2. Model Inputs
 
-### A. Raw Source Fields (from [`mplads_recommended_works_2026-08-22.csv`](file:///c:/Users/DIVYA/OneDrive/Desktop/3_Projects_and_Development/Projects/SIH/mplads-risk-analytics/Datasets/mplads_recommended_works_2026-08-22.csv) & [`mplads_completed_works_2026-08-22.csv`](file:///c:/Users/DIVYA/OneDrive/Desktop/3_Projects_and_Development/Projects/SIH/mplads-risk-analytics/Datasets/mplads_completed_works_2026-08-22.csv))
+### A. Raw Source Fields (Derived from `New Datasets/`)
 
-| Field Name | Type | Description | Sample Value |
-| :--- | :---: | :--- | :--- |
-| `Work ID` | Int | Unique project identifier | `134703` |
-| `Work Description` | String | Description / scope of work | `"Upgradation of Road from..."` |
-| `Category` | String | Project sector category | `"Normal/Others"` |
-| `MP Name` | String | Recommending Member of Parliament | `"DAGGUMALLA PRASADA RAO"` |
-| `Constituency` | String | Parliamentary Constituency | `"CHITTOOR"` |
-| `IDA` | String | Implementing District Authority | `"CHITTOOR(DISTRICT COLLECTOR...)"` |
-| `Recommended Amount (₹)`| Float | Initial sanctioned estimate | `350000.0` |
-| `Recommendation Date` | String | ISO proposal timestamp | `"2024-01-10T00:00:00.000Z"` |
-| `Final Amount (₹)` | Float | Final settled payout | `499993.0` |
-| `Completed Date` | String | ISO completion sign-off timestamp | `"2025-01-31T00:00:00.000Z"` |
-| `Has Images` | Boolean | Mobile app photo proof attached | `False` |
+| Field Name | Type | Description | Source Dataset | Sample Value |
+| :--- | :---: | :--- | :--- | :--- |
+| `work_id` | String | Standardized unique project code | All CSVs | `"WS/MP620/2024-2025/133166"` |
+| `work_description` | String | Civil work title and physical scope | Recommended / Sanctioned | `"Construction of Community Bhavan..."` |
+| `work_category` | String | Project sector category | Recommended / Sanctioned | `"Normal/Others"` |
+| `state` | String | State / Union Territory | All CSVs | `"Karnataka"` |
+| `mp_name` | String | Recommending Member of Parliament | All CSVs | `"Pralhad Venkatesh Joshi"` |
+| `constituency` | String | Parliamentary Constituency | All CSVs | `"DHARWAD"` |
+| `ida` | String | Implementing District Authority | All CSVs | `"DHARWAD(DEPUTY COMMISSIONER...)"` |
+| `recommended_amount` | Float | Initial proposed project budget (₹) | Works Recommended | `497185.0` |
+| `recommended_date` | String | Proposal date (`YYYY-MM-DD`) | Works Recommended | `"2024-07-08"` |
+| `sanction_amount` | Float | Approved administrative budget (₹) | Works Sanctioned | `497185.0` |
+| `sanction_date` | String | Administrative sanction date (`YYYY-MM-DD`)| Works Sanctioned | `"2024-07-09"` |
+| `work_status` | String | Current execution milestone | Works Sanctioned | `"Physical Inspection"` |
+| `amount_disbursed` | Float | Final / cumulative disbursed amount (₹) | Works Completed / Exp | `448127.0` |
+| `completion_date` | String | Project completion date (`YYYY-MM-DD` or `null`) | Works Completed | `"2024-09-05"` |
+| `has_photo_evidence` | Boolean| Mobile app geo-tagged photo verified | Works Completed (`Image`) | `false` |
 
 ---
 
-### B. Engineered Feature Vector (Fed into Execution Scoring Engine)
+### B. Engineered Feature Vector (Fed into ML Scorer)
 
-| Feature Name | Type | Calculation / Logic | Purpose | Range |
+| Feature Name | Type | Formula / Logic | Purpose | Normal Range |
 | :--- | :---: | :--- | :--- | :---: |
-| `cost_escalation_ratio` | Float | `Final Amount / Recommended Amount` | Detects budget inflation | `0.1` to `5.0+` |
-| `execution_days` | Int | `Completed Date - Recommendation Date` (in days) | Measures project lead time | `1` to `1,000+` |
-| `missing_photo_penalty`| Float | `1.0` if `Has Images == False`, else `0.0` | Heavy penalty for zero-proof works | `0.0` or `1.0` |
-| `mp_completion_rate` | Float | `MP Completed Works / MP Recommended Works * 100` | Contextual baseline for the MP | `0.0%` to `100%` |
-| `category_cost_deviation`| Float | `Z-Score(Final Amount)` within same work category | Flags abnormal category spending | `-3.0` to `+5.0` |
+| `rec_to_sanc_days` | Int | `Sanction Date - Recommended Date` | Measures administrative approval latency | 0 to 120 days |
+| `sanc_to_comp_days` | Int | `Completion Date - Sanction Date` (or `Current Date - Sanction Date` if ongoing) | Measures construction & inspection turnaround | 30 to 240 days |
+| `total_lead_time_days` | Int | `Completion Date - Recommended Date` | Total lifecycle turnaround | 60 to 365 days |
+| `is_stalled_365` | Boolean| `True` if ongoing project age > 365 days, else `False` | Detects chronic zombie projects | `False` |
+| `missing_photo_penalty`| Float | `40.0` if `has_photo_evidence == False`, else `0.0` | High governance penalty for unverified payouts | `0.0` or `40.0` |
+| `status_risk_factor` | Float | Weighted factor: `Physical Inspection` (0.8), `Vendor Identification` (0.7), `Partially Completed` (0.5), `Sanction` (0.4) | Quantifies milestone chokepoints | `0.1` to `1.0` |
+| `cost_escalation_ratio` | Float | `amount_disbursed / sanction_amount` | Flags budget inflation | `0.5` to `1.0` |
+| `mp_completion_ratio` | Float | `MP Completed Works / MP Sanctioned Works` | Contextual track record of the MP | `0.0` to `1.0` |
 
 ---
 
-### C. Live Real-Time API Input (JSON Request to `POST /api/predict/work`)
+### C. Live Real-Time API Input (JSON Request to `POST /api/predict/work-delay`)
 
 ```json
 {
-  "work_id": 134703,
-  "work_description": "Upgradation of Road from Madhavaram Village to Company Indlu",
-  "category": "Normal/Others",
-  "mp_name": "DAGGUMALLA PRASADA RAO",
-  "constituency": "CHITTOOR",
-  "ida": "CHITTOOR(DISTRICT COLLECTOR CHITTOOR_IDA)",
-  "recommended_amount": 350000.0,
-  "final_amount": 499993.0,
-  "recommendation_date": "2024-01-10T00:00:00.000Z",
-  "completed_date": "2025-01-31T00:00:00.000Z",
-  "has_images": false
+  "work_id": "WS/MP620/2024-2025/133166",
+  "work_description": "Construction of Community Bhavan at Navalgund TQ Belavatagi Village",
+  "work_category": "Normal/Others",
+  "state": "Karnataka",
+  "mp_name": "Pralhad Venkatesh Joshi",
+  "constituency": "DHARWAD",
+  "ida": "DHARWAD(DEPUTY COMMISSIONER DHARWAR_IDA)",
+  "recommended_amount": 497185.0,
+  "recommended_date": "2024-07-08",
+  "sanction_amount": 497185.0,
+  "sanction_date": "2024-07-09",
+  "work_status": "Physical Inspection",
+  "amount_disbursed": 448127.0,
+  "completion_date": null,
+  "has_photo_evidence": false
 }
 ```
 
 ---
 
-## 3. Model Outputs
+## 3. Model Outputs & Response Payloads
 
-### A. Raw Model Output
-* **`execution_outlier_score`:** Scaled float from 0.0 to 1.0 (e.g. `0.92`).
-* **`compliance_status`:** `"NON_COMPLIANT"` / `"COMPLIANT"`.
+### A. Raw Model Scores
+* **`execution_risk_score`:** Scaled float from `0.0` to `100.0` (e.g. `88.5`).
+* **`risk_level`:** Categorical string (`"HIGH_EXECUTION_RISK"`, `"MODERATE_RISK"`, `"COMPLIANT_LOW_RISK"`).
+* **`is_compliant`:** Boolean (`true` / `false`).
 
 ---
 
-### B. Processed JSON Response (Sent to Frontend)
+### B. Processed JSON Response (Sent to Frontend & Alerts)
 
-#### 🔴 Case 1: High Execution Risk (Zero Photo Proof + Cost Overrun)
+#### 🔴 Case 1: High Execution Risk (Stalled Project + Zero Photo Evidence)
 ```json
 {
-  "work_id": 134703,
-  "execution_risk_score": 92.0,
+  "work_id": "WS/MP620/2024-2025/133166",
+  "execution_risk_score": 88.5,
   "risk_level": "HIGH_EXECUTION_RISK",
   "is_compliant": false,
-  "metrics": {
-    "recommended_cost": 350000.0,
-    "final_settled_cost": 499993.0,
-    "cost_escalation_pct": "+42.85%",
-    "execution_duration_days": 387,
+  "lifecycle_metrics": {
+    "recommended_amount": 497185.0,
+    "sanction_amount": 497185.0,
+    "amount_disbursed": 448127.0,
+    "disbursement_pct": "90.13%",
+    "current_stage": "Physical Inspection",
+    "approval_latency_days": 1,
+    "current_project_age_days": 416,
+    "is_stalled": true,
     "has_photo_evidence": false
   },
   "flagged_reasons": [
-    "Missing Mandatory Proof: Project signed off as completed with NO photographic evidence (Has Images = False)",
-    "Cost Escalation: Final settled cost exceeded recommended estimate by 42.85% (₹1,49,993 overrun)",
-    "Prolonged Duration: Project took 387 days against state average of 180 days"
+    "Chronic Project Stalling: Project has been in 'Physical Inspection' stage for 416 days (national threshold: 180 days).",
+    "Missing Mandatory Photographic Proof: 90.13% of funds disbursed with NO geo-tagged inspection photos uploaded.",
+    "Blocked Public Capital: ₹4.48 Lakh disbursed without final project closure certificate."
   ],
-  "explainability_tags": ["ZERO_PHOTO_EVIDENCE", "COST_OVERRUN", "CHRONIC_DELAY"],
-  "recommended_action": "Withhold contractor final retention money and mandate geo-tagged inspection by District Vigilance Officer."
+  "explainability_tags": [
+    "CHRONIC_STALLING_365D",
+    "ZERO_PHOTO_EVIDENCE",
+    "PHYSICAL_INSPECTION_BOTTLENECK"
+  ],
+  "recommended_action": "Issue formal show-cause notice to DHARWAD District Authority and order mandatory on-site physical verification by District Vigilance Officer."
 }
 ```
 
-#### 🟢 Case 2: Low Execution Risk (Completed on Time with Photos)
+#### 🟢 Case 2: Low Execution Risk (Completed on Time with Verified Photos)
 ```json
 {
-  "work_id": 134704,
-  "execution_risk_score": 11.5,
+  "work_id": "WS/MP418/2024-2025/133409",
+  "execution_risk_score": 12.0,
   "risk_level": "COMPLIANT_LOW_RISK",
   "is_compliant": true,
-  "metrics": {
-    "recommended_cost": 500000.0,
-    "final_settled_cost": 495000.0,
-    "cost_escalation_pct": "-1.00%",
-    "execution_duration_days": 120,
+  "lifecycle_metrics": {
+    "recommended_amount": 450000.0,
+    "sanction_amount": 448127.0,
+    "amount_disbursed": 448127.0,
+    "disbursement_pct": "100.00%",
+    "current_stage": "Work Completed",
+    "approval_latency_days": 14,
+    "execution_duration_days": 85,
+    "is_stalled": false,
     "has_photo_evidence": true
   },
   "flagged_reasons": [],
-  "explainability_tags": ["COMPLIANT", "VERIFIED_PHOTOS"],
-  "recommended_action": "Standard audit closure approved."
+  "explainability_tags": [
+    "ON_TIME_COMPLETION",
+    "VERIFIED_PHOTOS",
+    "WITHIN_BUDGET"
+  ],
+  "recommended_action": "Standard audit sign-off and Final Completion Certificate (FCC) approved."
 }
 ```
 
@@ -121,10 +151,108 @@ This specification details the exact input features and output structure for **M
 
 ## 4. Frontend UI Component Mapping
 
-| Output Field | UI Component | Visual Representation |
+| API Output Field | Target UI Component | Visual Presentation in Dashboard |
 | :--- | :--- | :--- |
-| `execution_risk_score` (92.0) | **Risk Rating Gauge** | Amber/Red Meter (`92/100`) |
-| `has_photo_evidence` (`false`) | **Photo Proof Badge** | Red Cross Icon (`❌ No Photos Uploaded`) |
-| `cost_escalation_pct` (`+42.85%`)| **Cost Variance Indicator** | Red Upward Arrow (`▲ +42.85% Cost Delta`) |
-| `flagged_reasons` | **Project Audit Drawer** | Bullet list of compliance infractions |
-| `recommended_action` | **Collector Action Button** | *"Order Physical Site Inspection"* button |
+| `execution_risk_score` (`88.5`) | **Risk Rating Radial Gauge** | Crimson Meter (`88.5 / 100`) |
+| `current_stage` (`"Physical Inspection"`) | **Lifecycle Stepper Badge** | Step Indicator with Amber Warning on delayed stage |
+| `has_photo_evidence` (`false`) | **Geo-Photo Compliance Tag** | Red Warning Pill (`❌ 0 Photos Uploaded`) |
+| `current_project_age_days` (`416`) | **Stalling Clock** | Red Highlight (`⏱️ 416 Days Active - Stalled`) |
+| `flagged_reasons` | **Collector Audit Drawer** | Structured list of specific governance infractions |
+| `recommended_action` | **District Action Trigger** | *"Order Vigilance Physical Inspection"* action button |
+
+---
+
+## 5. Integration Code Snippet (FastAPI Endpoint)
+
+```python
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+from typing import Optional, List
+import datetime
+
+router = APIRouter(prefix="/api/predict", tags=["Execution Risk Engine"])
+
+class WorkExecutionInput(BaseModel):
+    work_id: str = Field(..., example="WS/MP620/2024-2025/133166")
+    work_description: str
+    work_category: str = "Normal/Others"
+    state: str
+    mp_name: str
+    constituency: str
+    ida: str
+    recommended_amount: float
+    recommended_date: datetime.date
+    sanction_amount: float
+    sanction_date: datetime.date
+    work_status: str
+    amount_disbursed: float
+    completion_date: Optional[datetime.date] = None
+    has_photo_evidence: bool = False
+
+@router.post("/work-delay")
+def predict_execution_risk(payload: WorkExecutionInput):
+    # 1. Calculate age & delays
+    today = datetime.date.today()
+    approval_latency = (payload.sanction_date - payload.recommended_date).days
+    
+    if payload.completion_date:
+        exec_duration = (payload.completion_date - payload.sanction_date).days
+        is_stalled = False
+        project_age = exec_duration
+    else:
+        project_age = (today - payload.sanction_date).days
+        is_stalled = project_age > 365
+
+    # 2. Risk scoring calculation
+    risk_score = 0.0
+    flags = []
+    tags = []
+
+    # Check photo evidence
+    if not payload.has_photo_evidence:
+        risk_score += 40.0
+        flags.append("Missing Mandatory Proof: Work recorded with NO photographic evidence.")
+        tags.append("ZERO_PHOTO_EVIDENCE")
+
+    # Check stalling
+    if is_stalled:
+        risk_score += 45.0
+        flags.append(f"Chronic Stalling: Project has been in '{payload.work_status}' for {project_age} days (>365d).")
+        tags.append("CHRONIC_STALLING_365D")
+    elif project_age > 180 and not payload.completion_date:
+        risk_score += 20.0
+        flags.append(f"Moderate Delay: Project active for {project_age} days (>180d).")
+        tags.append("MODERATE_DELAY")
+
+    # Determine risk level
+    risk_score = min(100.0, risk_score)
+    if risk_score >= 70.0:
+        level = "HIGH_EXECUTION_RISK"
+        action = "Issue show-cause notice and mandate on-site inspection by District Vigilance Officer."
+    elif risk_score >= 30.0:
+        level = "MODERATE_RISK"
+        action = "Request expedited milestone status update from Implementing District Authority."
+    else:
+        level = "COMPLIANT_LOW_RISK"
+        action = "Standard audit sign-off and Final Completion Certificate approved."
+
+    return {
+        "work_id": payload.work_id,
+        "execution_risk_score": round(risk_score, 1),
+        "risk_level": level,
+        "is_compliant": risk_score < 30.0,
+        "lifecycle_metrics": {
+            "recommended_amount": payload.recommended_amount,
+            "sanction_amount": payload.sanction_amount,
+            "amount_disbursed": payload.amount_disbursed,
+            "current_stage": payload.work_status,
+            "approval_latency_days": approval_latency,
+            "current_project_age_days": project_age,
+            "is_stalled": is_stalled,
+            "has_photo_evidence": payload.has_photo_evidence
+        },
+        "flagged_reasons": flags,
+        "explainability_tags": tags,
+        "recommended_action": action
+    }
+```
