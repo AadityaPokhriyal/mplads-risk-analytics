@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas.expenditure_schema import *
-
+from app.services.feature_engineering import build_csv_indexes, engineer_features_fast
 from ExpenditureModelModule import ExpenditureAnomalyModel, engineer_features
 
 from dotenv import load_dotenv
@@ -68,41 +68,15 @@ async def lifespan(app: FastAPI):
 
     _state["engine"] = ExpenditureAnomalyModel.load(config["MODEL_PATH"])
 
-    # --- Historical expenditures ---
-    # Last row in this CSV is a totals/summary row, not a real transaction —
-    # drop it, or it would be treated as one giant fake vendor payment and
-    # badly distort every rolling-window feature.
-    history = pd.read_csv(config["HISTORY_CSV_PATH"])
-    history = history.iloc[:-1].copy()
-
-    # IMPORTANT: keep "Expenditure Date" as the SAME raw string format the
-    # CSV already uses ("%d-%b-%Y", per engineer_features' hardcoded parse
-    # format). Do NOT convert to datetime here — engineer_features is the
-    # single place that parses dates, and re-stringifying an already-parsed
-    # Timestamp produces a different format that its format='%d-%b-%Y' would
-    # fail to re-parse, silently turning every row into NaT.
-    history["Expenditure Date"] = history["Expenditure Date"].astype(str).str.strip()
-
-    n_before = len(history)
-    parsed_check = pd.to_datetime(history["Expenditure Date"], format="%d-%b-%Y", errors="coerce")
-    n_bad = parsed_check.isna().sum()
-    if n_bad:
-        print(f"WARNING: {n_bad} of {n_before} historical row(s) have a date that "
-              f"doesn't match format '%d-%b-%Y'. These rows will still be passed "
-              f"through, but engineer_features will treat their date as invalid.")
-
-    _state["history"] = history
-
-    # --- MP allocation lookup ---
-    # Same totals-row issue applies here.
+    # Load historical CSVs and build high-performance in-memory indexes (~50ms on boot)
+    history_df = pd.read_csv(config["HISTORY_CSV_PATH"])
     alloc_df = pd.read_csv(config["ALLOCATION_CSV_PATH"])
-    alloc_df = alloc_df.iloc[:-1].copy()
-    _state["mp_budget_lookup"] = dict(
-        zip(
-            alloc_df["MP Name"],
-            alloc_df["Allocated Amount in rupees"].astype(str).str.replace(",", "").astype(float),
-        )
-    )
+
+    mp_budget_lookup, vendor_history_index, ida_monthly_index = build_csv_indexes(history_df, alloc_df)
+
+    _state["mp_budget_lookup"] = mp_budget_lookup
+    _state["vendor_history_index"] = vendor_history_index
+    _state["ida_monthly_index"] = ida_monthly_index
 
     yield
     _state.clear()
@@ -152,10 +126,6 @@ def _raw_input_to_row(txn: ExpenditureInput) -> dict:
         "Constituency": txn.constituency,
         "IDA": txn.ida,
         "Vendor Name": txn.vendor,
-        # Kept as a string (not float) so it concatenates cleanly with the
-        # historical CSV's comma-formatted string column — engineer_features
-        # calls .str.replace(',', '') on this column, which requires every
-        # value to be a string, not a mix of strings and floats.
         "Fund Disbursed Amount ( ₹ )": str(txn.expenditure_amount),
         "Expenditure Date": date_str,
     }
@@ -163,34 +133,20 @@ def _raw_input_to_row(txn: ExpenditureInput) -> dict:
 
 def _score_context(new_rows_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Merges new transaction(s) with recent historical transactions so
-    rolling-window features have context, then runs engineer_features ONCE
-    on the combined raw data and returns only the new rows.
+    Computes feature engineering for new incoming transaction(s) using fast
+    in-memory CSV index lookups, executing in milliseconds with zero external DBs.
     """
-    history = _state["history"]
-    mp_budget_lookup = _state["mp_budget_lookup"]
     config = _state["config"]
 
-    new_rows_df = new_rows_df.copy()
-    new_rows_df["_is_new"] = True
-
-    hist = history.copy()
-    hist["_is_new"] = False
-
-    # Lookback filtering needs real datetime comparison, done on a temporary
-    # column only — the actual "Expenditure Date" column stays as the raw
-    # '%d-%b-%Y' string all the way into engineer_features.
-    hist["_parsed_date_tmp"] = pd.to_datetime(hist["Expenditure Date"], format="%d-%b-%Y", errors="coerce")
-    new_parsed = pd.to_datetime(new_rows_df["Expenditure Date"], format="%d-%b-%Y", errors="coerce")
-    min_needed_date = new_parsed.min() - pd.Timedelta(days=config["LOOKBACK_DAYS"])
-    hist = hist[hist["_parsed_date_tmp"] >= min_needed_date].drop(columns=["_parsed_date_tmp"])
-
-    combined = pd.concat([hist, new_rows_df], ignore_index=True)
-    combined_features, feature_cols = engineer_features(
-        combined, mp_budget_lookup, approval_thresholds=config["APPROVAL_THRESHOLDS"]
+    scored, _ = engineer_features_fast(
+        new_rows_df=new_rows_df,
+        mp_budget_lookup=_state["mp_budget_lookup"],
+        vendor_history_index=_state["vendor_history_index"],
+        ida_monthly_index=_state["ida_monthly_index"],
+        approval_thresholds=config["APPROVAL_THRESHOLDS"],
     )
 
-    return combined_features[combined_features["_is_new"] == True].copy()
+    return scored
 
 
 # ---------------------------------------------------------------------------
