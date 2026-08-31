@@ -77,3 +77,6 @@ coverage.xml
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# bat file
+run.bat
