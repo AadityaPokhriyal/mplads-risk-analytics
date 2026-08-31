@@ -1,11 +1,18 @@
 """
-FastAPI service for the MPLADS Expenditure Anomaly Engine.
+FastAPI service for the MPLADS Multi-Model Risk Analytics Platform:
+- Pillar 1: Expenditure Anomaly Engine (Isolation Forest + SHAP)
+- Pillar 2: Project Execution Delay & Stalling Engine (Multi-Stage Latency + Governance Checks)
 
 Endpoints:
     POST /api/predict/expenditure   - score ONE incoming transaction (with SHAP explanation)
     POST /api/predict/expenditures  - score MANY transactions at once (fast, no SHAP by default)
+    POST /api/predict/work-delay    - score ONE work execution & stalling risk (Pillar 2)
+    POST /api/predict/works-delay   - score MANY work executions & stalling risk in batch (Pillar 2)
+    GET  /health                    - system and model health status
 
-Run with (from the project root, one level ABOVE this file's folder):
+Run with (from the project root):
+    python -m app.main
+  or:
     uvicorn app.main:app --reload
 """
 
@@ -16,9 +23,29 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.schemas.expenditure_schema import *
+# Model 1 (Expenditure)
+from app.schemas.expenditure_schema import (
+    ExpenditureInput,
+    ExpenditureBatchInput,
+    PredictionOutput,
+    BatchPredictionOutput,
+    BatchPredictionItem,
+)
 from app.services.feature_engineering import build_csv_indexes, engineer_features_fast
-from ExpenditureModelModule import ExpenditureAnomalyModel, engineer_features
+from ExpenditureModelModule import ExpenditureAnomalyModel
+
+# Model 2 (Execution Delay)
+from app.schemas.execution_schema import (
+    WorkExecutionInput,
+    WorkExecutionBatchInput,
+    WorkExecutionPredictionOutput,
+    WorkExecutionBatchOutput,
+)
+from app.services.execution_feature_engineering import (
+    build_execution_indexes,
+    engineer_execution_features_fast,
+)
+from ExecutionModelModule import ExecutionDelayModel
 
 from dotenv import load_dotenv
 
@@ -45,17 +72,27 @@ def _load_config() -> dict:
     except ValueError as e:
         raise RuntimeError(f"LOOKBACK_DAYS must be an integer, got '{os.getenv('LOOKBACK_DAYS')}'") from e
 
+    try:
+        port = int(os.getenv("PORT", "3000"))
+    except ValueError as e:
+        raise RuntimeError(f"PORT must be an integer, got '{os.getenv('PORT')}'") from e
+
     return {
         "MODEL_PATH": os.getenv("MODEL_PATH"),
+        "EXECUTION_MODEL_PATH": os.getenv("EXECUTION_MODEL_PATH", "models/execution_delay_model.joblib"),
         "HISTORY_CSV_PATH": os.getenv("HISTORY_CSV_PATH"),
         "ALLOCATION_CSV_PATH": os.getenv("ALLOCATION_CSV_PATH"),
         "APPROVAL_THRESHOLDS": approval_thresholds,
         "LOOKBACK_DAYS": lookback_days,
+        "PORT": port,
+        "WORKS_RECOMMENDED_CSV_PATH": os.getenv("WORKS_RECOMMENDED_CSV_PATH", "New Datasets/Works Recommended.csv"),
+        "WORKS_SANCTIONED_CSV_PATH": os.getenv("WORKS_SANCTIONED_CSV_PATH", "New Datasets/Works Sanctioned.csv"),
+        "WORKS_COMPLETED_CSV_PATH": os.getenv("WORKS_COMPLETED_CSV_PATH", "New Datasets/Works Completed.csv"),
     }
 
 
 # ---------------------------------------------------------------------------
-# App state
+# App state & Lifespan
 # ---------------------------------------------------------------------------
 
 _state = {}
@@ -66,23 +103,62 @@ async def lifespan(app: FastAPI):
     config = _load_config()
     _state["config"] = config
 
+    # 1. Load Model 1 (Expenditure Anomaly Engine)
     _state["engine"] = ExpenditureAnomalyModel.load(config["MODEL_PATH"])
 
-    # Load historical CSVs and build high-performance in-memory indexes (~50ms on boot)
     history_df = pd.read_csv(config["HISTORY_CSV_PATH"])
     alloc_df = pd.read_csv(config["ALLOCATION_CSV_PATH"])
 
     mp_budget_lookup, vendor_history_index, ida_monthly_index = build_csv_indexes(history_df, alloc_df)
-
     _state["mp_budget_lookup"] = mp_budget_lookup
     _state["vendor_history_index"] = vendor_history_index
     _state["ida_monthly_index"] = ida_monthly_index
+
+    # 2. Load Model 2 (Execution Delay & Stalling Engine)
+    rec_path = config["WORKS_RECOMMENDED_CSV_PATH"]
+    sanc_path = config["WORKS_SANCTIONED_CSV_PATH"]
+    comp_path = config["WORKS_COMPLETED_CSV_PATH"]
+
+    rec_df = pd.read_csv(rec_path) if os.path.exists(rec_path) else pd.DataFrame()
+    sanc_df = pd.read_csv(sanc_path) if os.path.exists(sanc_path) else pd.DataFrame()
+    comp_df = pd.read_csv(comp_path) if os.path.exists(comp_path) else pd.DataFrame()
+
+    execution_indexes = build_execution_indexes(rec_df, sanc_df, comp_df)
+    _state["execution_indexes"] = execution_indexes
+
+    model_joblib_path = config.get("EXECUTION_MODEL_PATH", "models/execution_delay_model.joblib")
+    if os.path.exists(model_joblib_path):
+        execution_model = ExecutionDelayModel.load(model_joblib_path)
+    else:
+        execution_model = ExecutionDelayModel()
+        if len(sanc_df) > 0:
+            hist_sample = sanc_df.copy().head(5000)
+            hist_sample["work_id"] = hist_sample.get("Work", "UNKNOWN")
+            hist_sample["recommended_amount"] = hist_sample.get("Sanction Amount ( ₹ )", 0)
+            hist_sample["sanction_amount"] = hist_sample.get("Sanction Amount ( ₹ )", 0)
+            hist_sample["amount_disbursed"] = hist_sample.get("Sanction Amount ( ₹ )", 0)
+            hist_sample["recommended_date"] = hist_sample.get("Recommended date", "")
+            hist_sample["sanction_date"] = hist_sample.get("Sanction Date", "")
+            hist_sample["work_status"] = hist_sample.get("Work Status", "Ongoing")
+            hist_sample["has_photo_evidence"] = False
+            hist_sample["state"] = hist_sample.get("State", "")
+            hist_sample["mp_name"] = hist_sample.get("Hon'ble Members of Parliament", "")
+            hist_sample["ida"] = hist_sample.get("IDA", "")
+            hist_sample["constituency"] = hist_sample.get("Constituency", "")
+
+            try:
+                feats, _ = engineer_execution_features_fast(hist_sample, execution_indexes)
+                execution_model.fit(feats)
+            except Exception:
+                pass
+
+    _state["execution_engine"] = execution_model
 
     yield
     _state.clear()
 
 
-app = FastAPI(title="MPLADS Expenditure Anomaly Engine", lifespan=lifespan)
+app = FastAPI(title="MPLADS Risk Analytics Engine", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # CORS Middleware
@@ -101,17 +177,10 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Model 1 Helpers
 # ---------------------------------------------------------------------------
 
 def _to_raw_date_string(date_str: str) -> str:
-    """
-    Normalizes whatever date format the API caller sends into the exact
-    '%d-%b-%Y' string format the historical CSV and engineer_features()
-    both expect (e.g. '02-Jul-2026'). Accepts common formats (ISO, etc.)
-    and re-emits them consistently so history and new rows always align
-    on the same string convention before engineer_features ever runs.
-    """
     parsed = pd.to_datetime(date_str, errors="coerce")
     if pd.isna(parsed):
         return None
@@ -132,12 +201,7 @@ def _raw_input_to_row(txn: ExpenditureInput) -> dict:
 
 
 def _score_context(new_rows_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Computes feature engineering for new incoming transaction(s) using fast
-    in-memory CSV index lookups, executing in milliseconds with zero external DBs.
-    """
     config = _state["config"]
-
     scored, _ = engineer_features_fast(
         new_rows_df=new_rows_df,
         mp_budget_lookup=_state["mp_budget_lookup"],
@@ -145,21 +209,21 @@ def _score_context(new_rows_df: pd.DataFrame) -> pd.DataFrame:
         ida_monthly_index=_state["ida_monthly_index"],
         approval_thresholds=config["APPROVAL_THRESHOLDS"],
     )
-
     return scored
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Model 1 Endpoints (Expenditure Anomaly Engine)
 # ---------------------------------------------------------------------------
 
 @app.post("/api/predict/expenditure", response_model=PredictionOutput, response_model_by_alias=True)
-def predict_single(txn: ExpenditureInput):
+def predict_single_expenditure(txn: ExpenditureInput):
     """
-    Score ONE incoming transaction. Includes a SHAP-based explanation of
-    which features drove the score.
+    Score ONE incoming expenditure transaction (with SHAP explanation).
     """
-    engine: ExpenditureAnomalyModel = _state["engine"]
+    engine: ExpenditureAnomalyModel = _state.get("engine")
+    if not engine:
+        raise HTTPException(status_code=503, detail="Expenditure engine is not loaded.")
 
     try:
         row_dict = _raw_input_to_row(txn)
@@ -172,9 +236,7 @@ def predict_single(txn: ExpenditureInput):
         if len(scored) == 0:
             raise HTTPException(
                 status_code=422,
-                detail="Could not compute features for this transaction — the row was "
-                       "dropped during feature engineering. Check server logs for a "
-                       "specific WARNING about invalid dates or missing fields.",
+                detail="Could not compute features for this transaction — check date format or required fields.",
             )
 
         row = scored.iloc[0]
@@ -190,12 +252,13 @@ def predict_single(txn: ExpenditureInput):
 
 
 @app.post("/api/predict/expenditures", response_model=BatchPredictionOutput)
-def predict_batch(payload: ExpenditureBatchInput):
+def predict_batch_expenditures(payload: ExpenditureBatchInput):
     """
-    Score MANY transactions at once. Uses vectorized predict_batch() —
-    no per-row SHAP — so this stays fast even for large payloads.
+    Score MANY expenditure transactions at once (high throughput).
     """
-    engine: ExpenditureAnomalyModel = _state["engine"]
+    engine: ExpenditureAnomalyModel = _state.get("engine")
+    if not engine:
+        raise HTTPException(status_code=503, detail="Expenditure engine is not loaded.")
 
     if not payload.transactions:
         raise HTTPException(status_code=400, detail="No transactions provided.")
@@ -238,6 +301,88 @@ def predict_batch(payload: ExpenditureBatchInput):
         raise HTTPException(status_code=500, detail=f"Batch scoring failed: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Model 2 Endpoints (Project Execution Delay & Stalling Engine)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/predict/work-delay", response_model=WorkExecutionPredictionOutput)
+def predict_single_work_delay(work: WorkExecutionInput):
+    """
+    Score ONE project for execution latency, stalling risk (>365d),
+    mandatory photographic evidence compliance, and cost escalation.
+    """
+    execution_engine: ExecutionDelayModel = _state.get("execution_engine")
+    execution_indexes = _state.get("execution_indexes", {})
+
+    if not execution_engine:
+        raise HTTPException(status_code=503, detail="Execution Delay Engine is not loaded.")
+
+    try:
+        work_dict = work.model_dump()
+        work_df = pd.DataFrame([work_dict])
+
+        scored_df, _ = engineer_execution_features_fast(work_df, execution_indexes)
+        if len(scored_df) == 0:
+            raise HTTPException(status_code=422, detail="Failed to engineer execution features.")
+
+        row = scored_df.iloc[0]
+        result = execution_engine.predict_row(row)
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Execution risk scoring failed: {e}")
+
+
+@app.post("/api/predict/works-delay", response_model=WorkExecutionBatchOutput)
+def predict_batch_works_delay(payload: WorkExecutionBatchInput):
+    """
+    Score MULTIPLE projects for execution latency, stalling risk,
+    and compliance in batch mode.
+    """
+    execution_engine: ExecutionDelayModel = _state.get("execution_engine")
+    execution_indexes = _state.get("execution_indexes", {})
+
+    if not execution_engine:
+        raise HTTPException(status_code=503, detail="Execution Delay Engine is not loaded.")
+
+    if not payload.works:
+        raise HTTPException(status_code=400, detail="No projects provided.")
+
+    try:
+        rows = [w.model_dump() for w in payload.works]
+        works_df = pd.DataFrame(rows)
+
+        scored_df, _ = engineer_execution_features_fast(works_df, execution_indexes)
+        if len(scored_df) == 0:
+            raise HTTPException(status_code=422, detail="Failed to engineer features for batch.")
+
+        batch_result = execution_engine.predict_batch(scored_df)
+        return batch_result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch execution scoring failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Health & Status Endpoint
+# ---------------------------------------------------------------------------
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": "engine" in _state}
+    return {
+        "status": "ok",
+        "expenditure_model_loaded": "engine" in _state,
+        "execution_model_loaded": "execution_engine" in _state,
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("PORT", "3000"))
+    host = os.getenv("HOST", "0.0.0.0")
+    uvicorn.run("app.main:app", host=host, port=port, reload=True)

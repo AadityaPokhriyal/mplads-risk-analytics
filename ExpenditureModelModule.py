@@ -3,7 +3,12 @@ import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 import joblib
-import shap
+import importlib
+
+try:
+    shap = importlib.import_module("shap")
+except Exception:
+    shap = None
 
 def _threshold_proximity(amount: float, thresholds: list, decay_rate: float = 0.05) -> float:
     candidates = [t for t in thresholds if amount <= t]
@@ -98,18 +103,29 @@ class ExpenditureAnomalyModel:
         raw_scores = self.model.decision_function(X_scaled)
         self._score_min = raw_scores.min()
         self._score_max = raw_scores.max()
-        self._background = shap.sample(X_scaled, min(100, len(X_scaled)), random_state=self.random_state)
+        if shap is not None:
+            self._background = shap.sample(X_scaled, min(100, len(X_scaled)), random_state=self.random_state)
+        else:
+            sample_size = min(100, len(X_scaled))
+            indices = np.random.RandomState(self.random_state).choice(len(X_scaled), sample_size, replace=False)
+            self._background = X_scaled[indices]
         self._build_explainer()
         return self
 
     def _build_explainer(self):
+        if shap is None:
+            self.explainer = None
+            return
         try:
             self.explainer = shap.TreeExplainer(self.model, feature_names=self.feature_cols)
         except Exception:
-            self.explainer = shap.Explainer(
-                self.model.decision_function, self._background,
-                feature_names=self.feature_cols, algorithm="permutation",
-            )
+            try:
+                self.explainer = shap.Explainer(
+                    self.model.decision_function, self._background,
+                    feature_names=self.feature_cols, algorithm="permutation",
+                )
+            except Exception:
+                self.explainer = None
 
     def _to_risk_score(self, raw_score: float) -> float:
         span = self._score_max - self._score_min
